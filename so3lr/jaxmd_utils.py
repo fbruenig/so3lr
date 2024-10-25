@@ -61,6 +61,7 @@ def to_jax_md(
         minimum_cell_size_multiplier_lr: float = 1.0,
         disable_cell_list: bool = False,
         fractional_coordinates: bool = True,
+        obs_fn_kwargs: Dict[str, Dict[str, int]] = {},
         **neighbor_kwargs
 ):
     # create the neighbor_fn
@@ -95,19 +96,31 @@ def to_jax_md(
         displacement_or_metric,
         species
     )
+    
+    # create an energy_fn that always returns a tuple of (energy, aux)
+    # requires obs_fn_kwargs to be passed
+    # Remember that jax_md version needs to be chosen accordingly
+    if obs_fn_kwargs:
+        def energy_fn(
+                R,
+                neighbor,
+                neighbor_lr,
+                **energy_fn_kwargs
+        ):  
+            graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
 
-    # create an energy_fn that is compatible with jax_md
-    def energy_fn(
-            R,
-            neighbor,
-            neighbor_lr,
-            obs_fn_kwargs: Dict[str, Dict[str, int]] = {},
-            **energy_fn_kwargs
-    ):  
-        graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
-        if obs_fn_kwargs:
-            return potential(graph,has_aux=[[True]],**obs_fn_kwargs)
-        else:
-            return potential(graph).sum()
+            energies, aux = potential(graph,has_aux=[[True]],**obs_fn_kwargs)
+            
+            return energies.sum(), aux
+    else:        
+        def energy_fn(
+                R,
+                neighbor,
+                neighbor_lr,
+                **energy_fn_kwargs
+        ):  
+            graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
+
+            return potential(graph).sum(), None        
 
     return neighbor_fn, neighbor_fn_lr, energy_fn
