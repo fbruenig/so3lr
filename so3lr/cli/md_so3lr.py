@@ -25,7 +25,6 @@ HELP_STRING = """
 # MD settings and default values.\n
 \n
 # === General settings ===\n
-initial_geometry: "path/to/geometry.xyz"         # (str) Path to the initial geometry file\n
 model_path: "path/to/model/"                     # (str) Path to the model directory\n
 use_so3lr: True                                  # (bool) Whether to use SO3LR \n
 precision: "float32"                             # (str) Numerical precision, e.g., 'float32' or 'float64'\n
@@ -38,6 +37,8 @@ buffer_size_multiplier_lr: 1.25                  # (float) Buffer size multiplie
 hdf5_buffer_size: 5                              # (int) Number of frames to buffer before writing to the HDF5 file\n
 
 # === File Paths ===\n
+initial_geometry: "path/to/geometry.xyz"         # (str) Path to the initial geometry file\n
+cell: null                                       # (list) Cell of the system, overwrites the cell loaded from initial geometry.\n
 trajectory_hdf5_file: "trajectory.hdf5"          # (str) Output file for trajectory data in HDF5 format\n
 restart_save_path: null                          # (str) Optional path to save restart data from a previous run\n
 restart_load_path: null                          # (str) Optional path to load restart data from a previous run\n
@@ -71,7 +72,6 @@ nhc_npt_tau: null                                # (float) Barostat coupling con
 # === Miscellaneous settings ===\n
 total_charge: 0                                  # (int) Total charge of the system\n
 seed: 0                                          # (int) Random seed for MD.\n
-
 
 """
 
@@ -1100,9 +1100,13 @@ def perform_md(
     initial_geometry = read(initial_geometry)
 
     cell = initial_geometry.get_cell()
+
+    if all_settings.get('cell'):
+        cell = all_settings.get('cell')
+
     if np.all(cell == 0):
         cell = None
-    
+
     if cell is not None:
         shift_displacement = 'periodic'
         initial_geometry.wrap()
