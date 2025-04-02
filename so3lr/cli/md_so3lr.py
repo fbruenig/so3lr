@@ -5,7 +5,7 @@ import jax_md.quantity
 import numpy as np
 from ase.io import read, write
 from jax_md import units
-from typing import Dict, Tuple
+from typing import Dict, Tuple, MutableMapping, Iterable
 from mlff.mdx.potential import MLFFPotentialSparse
 import ase
 from functools import partial
@@ -73,6 +73,7 @@ nhc_npt_tau: null                                # (float) Barostat coupling con
 # === Miscellaneous settings ===\n
 total_charge: 0                                  # (int) Total charge of the system\n
 seed: 0                                          # (int) Random seed for MD.\n
+observables: []                                  # (list) List of observables to compute ("partial_charges", "dipole_vec")\n
 
 """
 
@@ -166,7 +167,8 @@ def init_hdf5_store(
     batch_size: int, 
     num_atoms: int,
     num_box_entries: int,
-    exist_ok: bool = False
+    exist_ok: bool = False,
+    observables: Iterable[str] = []
 )-> HDF5Store:
     """
     Initialize the HDF5 storage object.
@@ -178,6 +180,8 @@ def init_hdf5_store(
         num_box_entries (int): Number of entries in the box vector.
         exist_ok (bool, optional): Whether to overwrite the file if it exists.
                                     Defaults to False.
+        observables (Iterable[str], optional): List of observables to store.
+                                            Defaults to [].
 
     Raises:
         RuntimeError: If the file exists and exist_ok is set to False.
@@ -214,6 +218,21 @@ def init_hdf5_store(
         )
     }
 
+    for o in observables:
+        if o == "partial_charges":
+            dataset['partial_charges'] = DataSetEntry(
+                chunk_length=1,
+                shape=(batch_size, num_atoms, ),
+                dtype=np.float32
+            )
+
+        if o == "dipole_vec" in observables:
+            dataset['dipole_vec'] = DataSetEntry(
+                chunk_length=1,
+                shape=(batch_size, 1, 1),
+                dtype=np.float32
+            )
+
     return HDF5Store(_save_to, datasets=dataset, mode='w')
 
 def write_to_hdf5(
@@ -221,7 +240,8 @@ def write_to_hdf5(
     velocities: list,
     positions: list,
     boxs: list,
-)-> Tuple[list, list, list]:
+    obs_dict: MutableMapping[str, list] = {}
+)-> Tuple[list, list, list, MutableMapping[str, list]]:
     """
     Write the positions, velocities and box to the hdf5 file.
     Returns empty lists for the positions, velocities and boxs in order
@@ -232,9 +252,11 @@ def write_to_hdf5(
         velocities (list): List of velocities.
         positions (list): List of positions.
         boxs (list): List of box vectors.
+        obs_dict (MutableMapping[str, list], optional): Dictionary of observables. Defaults to {}.
 
     Returns:
-        Tuple[list, list, list]: Empty lists for the positions, velocities and boxs.
+        Tuple[list, list, list, MutableMapping[str, list]]: Empty lists for the positions, velocities and boxs.
+                                                And for the observables.
     """
     
     step_data = {
@@ -242,14 +264,20 @@ def write_to_hdf5(
         'velocities': jnp.stack(velocities, axis=0),
         'box': jnp.stack(boxs, axis=0) if len(boxs) > 0 else None
     }
-    
+
+    for o in obs_dict.keys():
+        step_data.update(
+            {o: jnp.stack(obs_dict[o], axis=0)},
+        )
+
     step_data = jax.tree.map(
         lambda u: np.asarray(u), step_data
         )
     
     hdf5_store.append(step_data)
+    obs_dict = {o: [] for o in obs_dict.keys()}
     
-    return [], [], []
+    return [], [], [], obs_dict
 
 class Featurizer:
     """
@@ -472,10 +500,14 @@ def to_jax_md_custom(
                 R,
                 neighbor,
                 neighbor_lr,
+                obs_fn_kwargs: Dict[str, Dict[str, int]] = {},
                 **energy_fn_kwargs
         ):
             graph = featurizer(R, neighbor, neighbor_lr, **energy_fn_kwargs)
-            return potential(graph).sum()
+            if obs_fn_kwargs:
+                return potential(graph,has_aux=[[True]],**obs_fn_kwargs)
+            else:
+                return potential(graph).sum()
 
         return neighbor_fn, neighbor_fn_lr, energy_fn
     
@@ -1198,6 +1230,57 @@ def create_npt_step_fn(
             return state, nbrs, box
         return step_npt_fn
 
+def create_obs_fn(
+    energy_fn: callable,
+    observables: Iterable[str],
+    lr: bool,
+)-> Tuple[callable, MutableMapping[str, list]]:
+    """
+    Creates an observation function for monitoring simulation observables.
+
+    Args:
+        energy_fn (callable): A function that computes the energy of the system.
+        observables (Iterable[str]): A list of observable names to monitor during the simulation.
+        lr (bool): A flag indicating whether to use a low-rank approximation.
+
+    Returns:
+        Tuple[callable, MutableMapping[str, list]]: A tuple containing:
+            - A callable observation function.
+            - A mutable dictionary mapping observable names to their respective lists of recorded values.
+    """
+
+    if "dipole_vec" in observables:
+        obs_opt_dict = dict(observable_attributes = dict( dipole_vec= jnp.array([1])) )
+
+    if "partial_charges" in observables:
+        obs_opt_dict = dict(observable_attributes = dict( dipole_vec= dict(partial_charges=jnp.array([1])) ))
+
+    obs_dict = {o: [] for o in observables}
+
+    if lr:
+        @jax.jit
+        def obs_fn(state):
+            state, nbrs, nbrs_lr, box = state
+            return  energy_fn(
+                        state.position,
+                        neighbor=nbrs.idx,
+                        neighbor_lr=nbrs_lr.idx,
+                        box=box,
+                        obs_fn_kwargs = obs_opt_dict
+                    )
+    else:
+        @jax.jit
+        def obs_fn(state):
+            state, nbrs, box = state
+            return  energy_fn(
+                        state.position,
+                        neighbor=nbrs.idx,
+                        box=box,
+                        obs_fn_kwargs = obs_opt_dict
+                    )
+
+    return obs_fn, obs_dict
+
 def create_md_fn(
     ensemble: str,
     lr: bool,
@@ -1365,14 +1448,15 @@ def perform_md(
             ensemble='nvt' if md_P is None else 'npt'
         )
         position = state.position
-    
+
     # Initialize the hdf5 storage
     hdf5_store = init_hdf5_store(
         save_to=trajectory_hdf5_file,
         batch_size=hdf5_buffer_size,
         num_atoms=position.shape[0],
         num_box_entries=1,
-        exist_ok=True
+        exist_ok=True,
+        observables = all_settings.get('observables', [])
     )
 
     # Loading the model
@@ -1498,6 +1582,15 @@ def perform_md(
                 mass=initial_geometry_dict['masses']
             )
 
+    # Setup additional observables
+    obs_dict={}
+    if 'observables' in all_settings and len(all_settings['observables']) > 0:
+        obs_fn, obs_dict = create_obs_fn(
+            energy_fn,
+            all_settings.get('observables', []),
+            lr
+        )
+
     # Running the MD
     if logger:
         logger.info('Starting MD simulation')
@@ -1527,6 +1620,7 @@ def perform_md(
 
     velocities, positions, boxs = [], [], []
     total_time = time.time()
+
     while current_cycle < md_cycles:
         old_time = time.time()
         
@@ -1560,7 +1654,8 @@ def perform_md(
             current_cycle += 1
             state = new_state
             box = new_box
-        # Calculate some quantities for printing
+
+            # Calculate some quantities for printing
             KE, PE, H, current_T, _ = compute_quantities(
                 energy_fn,
                 state,
@@ -1571,6 +1666,13 @@ def perform_md(
                 md_T,
                 md_P
             )
+
+            # Calculate observables
+            if 'observables' in all_settings:
+                obs_data = obs_fn((state, nbrs, nbrs_lr, box))
+                for key in obs_dict.keys():
+                    obs_dict[key].append(obs_data[1][key])
+
             if logger:
                 if current_T is not None:
                     logger.info(f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{current_T:.1f}\t{H:.3f}\t{(new_time - old_time) / md_steps:.4f}')    
@@ -1592,18 +1694,19 @@ def perform_md(
                     np.array(box)
                 )
                 
-            
+
             if (
                 (len(positions) % hdf5_buffer_size == 0 and
                 len(positions) > 0) or
                 (len(positions) == md_cycles*md_steps)
             ):
                 # Saving the trajectory to the hdf5 file 
-                positions, velocities, boxs = write_to_hdf5(
+                positions, velocities, boxs, obs_dict = write_to_hdf5(
                     hdf5_store,
                     velocities,
                     positions,
                     boxs,
+                    obs_dict
                 )
                 # Saving the state for restart
                 if create_restart:
@@ -2083,7 +2186,10 @@ def load_state(
     else:
         raise NotImplementedError('Only NVT and NPT ensembles are supported')
     
+    logging.info(f'Loaded state from {loaded_state['box']}.')
+    
     box = None if np.any(loaded_state['box'] == None) else loaded_state['box']
+    
     cycle = loaded_state['step']
     
     return state, box, cycle
