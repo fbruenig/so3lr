@@ -1281,6 +1281,23 @@ def perform_md(
             
         logger.info('----------------------------------------')
 
+        # Calculate some quantities for printing
+        KE, PE, H, current_T, _ = compute_quantities(
+            energy_fn,
+            state,
+            nbrs,
+            nbrs_lr,
+            box,
+            units.metal_unit_system(),
+            md_T,
+            md_P
+        )
+
+        if current_T is not None:
+            logger.info(f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{current_T:.1f}\t{H:.3f}\t{0.0:.4f}')
+        else:
+            logger.info(f'{current_cycle*md_steps}\t{KE:.2f}\t{PE:.2f}\t{KE+PE:.3f}\t{0.0:.4f}')
+
     velocities, positions, boxs = [], [], []
     total_time = time.time()
     while current_cycle < md_cycles:
