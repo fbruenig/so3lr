@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import jax_md
 import jax_md.quantity
 import numpy as np
-from ase.io import read
+from ase.io import read, write
 from jax_md import units
 from typing import Dict, Tuple
 from mlff.mdx.potential import MLFFPotentialSparse
@@ -37,7 +37,8 @@ buffer_size_multiplier_lr: 1.25                  # (float) Buffer size multiplie
 hdf5_buffer_size: 5                              # (int) Number of frames to buffer before writing to the HDF5 file\n
 
 # === File Paths ===\n
-initial_geometry: "path/to/geometry.xyz"         # (str) Path to the initial geometry file\n
+initial_geometry: "path/to/geometry.xyz"         # (str) Path to the initial geometry file, velocities can be parsed in extxyz format\n
+final_geometry: "path/to/final_geometry.xyz"     # (str) Path to the final geometry file, velocities are parsed in extxyz format\n
 cell: null                                       # (list) Cell of the system, overwrites the cell loaded from initial geometry.\n
 trajectory_hdf5_file: "trajectory.hdf5"          # (str) Output file for trajectory data in HDF5 format\n
 restart_save_path: null                          # (str) Optional path to save restart data from a previous run\n
@@ -517,11 +518,16 @@ def atoms_to_jnp(
     positions = jnp.array(atoms.get_positions(), dtype=precision)
     species = jnp.array(atoms.get_atomic_numbers(), dtype=jnp.int32)
     masses = jnp.array(atoms.get_masses(), dtype=precision)
+    if not np.all(atoms.get_velocities()==0):
+        velocities = jnp.array(atoms.get_velocities(), dtype=precision)
+    else:
+        velocities = None
     
     return {
         'positions': positions,
         'species': species,
-        'masses': masses
+        'masses': masses,
+        'velocities': velocities
     }
 
 def load_model(
@@ -781,7 +787,8 @@ def create_nhc_fn(
     T: float,
     box: jnp.ndarray,
     nhc_kwargs: dict,
-    lr: bool
+    lr: bool,
+    initial_velocities=None
 )-> Tuple[callable, callable]:
     """
     Create the NHC thermostat functions.
@@ -798,14 +805,74 @@ def create_nhc_fn(
     Returns:
         Tuple[callable, callable]: Init and apply functions.
     """
-    init_fn, apply_fn = jax_md.simulate.nvt_nose_hoover(
-        energy_fn,
-        shift,
-        dt=dt,
-        kT=T,
-        box=box,
-        thermostat_kwargs=nhc_kwargs
-    )   
+    if initial_velocities is None:
+        print('Initializing state with fresh velocities drawn from a normal distribution.')
+
+        init_fn, apply_fn = jax_md.simulate.nvt_nose_hoover(
+            energy_fn,
+            shift,
+            dt=dt,
+            kT=T,
+            box=box,
+            thermostat_kwargs=nhc_kwargs
+        )
+    else:
+        print('Initializing state with velocities from input geometry.')
+
+        # Unfortunately this copies a lot of code from jax_md
+        # TODO: In the future build the option directly in jax_md
+
+        from jax_md.simulate import NVTNoseHooverState, kinetic_energy, velocity_verlet, default_nhc_kwargs
+        from jax_md.simulate import nose_hoover_chain, initialize_momenta, canonicalize_mass
+        from jax_md import quantity
+        from jax_md.util import f32
+
+        thermostat_kwargs = default_nhc_kwargs(100 * dt, nhc_kwargs)
+        kT = f32(T)
+        shift_fn = shift
+
+        force_fn = quantity.canonicalize_force(energy_fn)
+        dt = f32(dt)
+        dt_2 = f32(dt / 2)
+        #if tau is None:
+        #    tau = dt * 100
+        #tau = f32(tau)
+        tau = f32(thermostat_kwargs['tau'])
+
+        #thermostat = nose_hoover_chain(dt, chain_length, chain_steps, sy_steps, tau)
+        thermostat = nose_hoover_chain(dt, **thermostat_kwargs)
+
+        def init_fn(key, R, mass=f32(1.0), **kwargs):
+            _kT = kT if 'kT' not in kwargs else kwargs['kT']
+
+            dof = quantity.count_dof(R)
+
+            state = NVTNoseHooverState(R, None, force_fn(R, **kwargs), mass, None)
+            state = canonicalize_mass(state)
+            #state = initialize_momenta(state, key, _kT)
+            state = state.set(momentum = state.mass * jnp.array(initial_velocities, dtype=R.dtype))
+            KE = kinetic_energy(state)
+            return state.set(chain=thermostat.initialize(dof, KE, _kT))
+
+        def apply_fn(state, **kwargs):
+            _kT = kT if 'kT' not in kwargs else kwargs['kT']
+
+            chain = state.chain
+
+            chain = thermostat.update_mass(chain, _kT)
+
+            p, chain = thermostat.half_step(state.momentum, chain, _kT)
+            state = state.set(momentum=p)
+
+            state = velocity_verlet(force_fn, shift_fn, dt, state, **kwargs)
+
+            chain = chain.set(kinetic_energy=kinetic_energy(state))
+
+            p, chain = thermostat.half_step(state.momentum, chain, _kT)
+            state = state.set(momentum=p, chain=chain)
+
+            return state
+
     init_fn = jax.jit(init_fn)
     apply_fn = jax.jit(apply_fn)
 
@@ -821,17 +888,175 @@ def create_npt_nhc_fn(
     P,
     nhc_kwargs,
     barostat_kwargs,
-    lr
+    lr,
+    initial_velocities=None
 ):
-    init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
-        energy_fn,
-        shift,
-        dt=dt,
-        kT=T,
-        pressure=P,
-        barostat_kwargs=barostat_kwargs,
-        thermostat_kwargs=nhc_kwargs
-    )   
+    if initial_velocities is None:
+
+        init_fn, apply_fn = jax_md.simulate.npt_nose_hoover(
+            energy_fn,
+            shift,
+            dt=dt,
+            kT=T,
+            pressure=P,
+            barostat_kwargs=barostat_kwargs,
+            thermostat_kwargs=nhc_kwargs
+        )
+
+    else:
+
+        # Same as above but for NVT, this is really not nice but for now we accept the code duplication from jax_md instead of branching jax_md for this
+
+        from jax_md.simulate import NPTNoseHooverState, kinetic_energy, velocity_verlet, default_nhc_kwargs
+        from jax_md.simulate import nose_hoover_chain, initialize_momenta, canonicalize_mass, _npt_box_info
+        from jax_md import quantity
+        from jax_md.util import f32
+        from jax_md import util
+        from jax import grad
+
+        thermostat_kwargs = default_nhc_kwargs(100 * dt, nhc_kwargs)
+        kT = f32(T)
+        pressure = f32(P)
+        shift_fn = shift
+
+        force_fn = quantity.canonicalize_force(energy_fn)
+        dt = f32(dt)
+        dt_2 = f32(dt / 2)
+        # if tau is None:
+        #     tau = dt * 100
+        #tau = f32(tau)
+        tau = f32(thermostat_kwargs['tau'])
+
+        barostat_kwargs = default_nhc_kwargs(1000 * dt, barostat_kwargs)
+        barostat = nose_hoover_chain(dt, **barostat_kwargs)
+
+        thermostat_kwargs = default_nhc_kwargs(100 * dt, nhc_kwargs)
+        thermostat = nose_hoover_chain(dt, **thermostat_kwargs)
+
+        def init_fn(key, R, box, mass=f32(1.0), **kwargs):
+            N, dim = R.shape
+
+            _kT = kT if 'kT' not in kwargs else kwargs['kT']
+
+            # The box position is defined via pos = (1 / d) log V / V_0.
+            zero = jnp.zeros((), dtype=R.dtype)
+            one = jnp.ones((), dtype=R.dtype)
+            box_position = zero
+            box_momentum = zero
+            box_mass = dim * (N + 1) * _kT * barostat_kwargs['tau'] ** 2 * one
+            KE_box = quantity.kinetic_energy(momentum=box_momentum, mass=box_mass)
+
+            if jnp.isscalar(box) or box.ndim == 0:
+                # TODO(schsam): This is necessary because of JAX issue #5849.
+                box = jnp.eye(R.shape[-1]) * box
+
+            state = NPTNoseHooverState(
+                R, None, force_fn(R, box=box, **kwargs),
+                mass, box, box_position, box_momentum, box_mass,
+                barostat.initialize(1, KE_box, _kT),
+                None)  # pytype: disable=wrong-arg-count
+            state = canonicalize_mass(state)
+            #state = initialize_momenta(state, key, _kT)
+            state = state.set(momentum = state.mass * jnp.array(initial_velocities, dtype=R.dtype))
+            KE = kinetic_energy(state)
+            return state.set(
+                thermostat=thermostat.initialize(quantity.count_dof(R), KE, _kT))
+
+        def update_box_mass(state, kT):
+            N, dim = state.position.shape
+            dtype = state.position.dtype
+            box_mass = jnp.array(dim * (N + 1) * kT * state.barostat.tau ** 2, dtype)
+            return state.set(box_mass=box_mass)
+
+        def box_force(alpha, vol, box_fn, position, momentum, mass, force, pressure,
+                        **kwargs):
+            N, dim = position.shape
+
+            def U(eps):
+                return energy_fn(position, box=box_fn(vol), perturbation=(1 + eps),
+                                **kwargs)
+
+            dUdV = grad(U)
+            KE2 = util.high_precision_sum(momentum ** 2 / mass)
+
+            return alpha * KE2 - dUdV(0.0) - pressure * vol * dim
+
+        def sinhx_x(x):
+            """Taylor series for sinh(x) / x as x -> 0."""
+            return (1 + x ** 2 / 6 + x ** 4 / 120 + x ** 6 / 5040 +
+                    x ** 8 / 362_880 + x ** 10 / 39_916_800)
+
+        def exp_iL1(box, R, V, V_b, **kwargs):
+            x = V_b * dt
+            x_2 = x / 2
+            sinhV = sinhx_x(x_2)  # jnp.sinh(x_2) / x_2
+            return shift_fn(R, R * (jnp.exp(x) - 1) + dt * V * jnp.exp(x_2) * sinhV,
+                            box=box, **kwargs)  # pytype: disable=wrong-keyword-args
+
+        def exp_iL2(alpha, P, F, V_b):
+            x = alpha * V_b * dt_2
+            x_2 = x / 2
+            sinhP = sinhx_x(x_2)  # jnp.sinh(x_2) / x_2
+            return P * jnp.exp(-x) + dt_2 * F * sinhP * jnp.exp(-x_2)
+
+        def inner_step(state, **kwargs):
+            _pressure = kwargs.pop('pressure', pressure)
+
+            R, P, M, F = state.position, state.momentum, state.mass, state.force
+            R_b, P_b, M_b = state.box_position, state.box_momentum, state.box_mass
+
+            N, dim = R.shape
+
+            vol, box_fn = _npt_box_info(state)
+
+            alpha = 1 + 1 / N
+            G_e = box_force(alpha, vol, box_fn, R, P, M, F, _pressure, **kwargs)
+            P_b = P_b + dt_2 * G_e
+            P = exp_iL2(alpha, P, F, P_b / M_b)
+
+            R_b = R_b + P_b / M_b * dt
+            state = state.set( box_position=R_b)
+
+            vol, box_fn = _npt_box_info(state)
+
+            box = box_fn(vol)
+            R = exp_iL1(box, R, P / M, P_b / M_b)
+            F = force_fn(R, box=box, **kwargs)
+
+            P = exp_iL2(alpha, P, F, P_b / M_b)
+            G_e = box_force(alpha, vol, box_fn, R, P, M, F, _pressure, **kwargs)
+            P_b = P_b + dt_2 * G_e
+
+            return state.set(position=R, momentum=P, mass=M, force=F,
+                            box_position=R_b, box_momentum=P_b, box_mass=M_b)
+
+        def apply_fn(state, **kwargs):
+            S = state
+            _kT = kT if 'kT' not in kwargs else kwargs['kT']
+
+            bc = barostat.update_mass(S.barostat, _kT)
+            tc = thermostat.update_mass(S.thermostat, _kT)
+            S = update_box_mass(S, _kT)
+
+            P_b, bc = barostat.half_step(S.box_momentum, bc, _kT)
+            P, tc = thermostat.half_step(S.momentum, tc, _kT)
+
+            S = S.set(momentum=P, box_momentum=P_b)
+            S = inner_step(S, **kwargs)
+
+            KE = quantity.kinetic_energy(momentum=S.momentum, mass=S.mass)
+            tc = tc.set(kinetic_energy=KE)
+
+            KE_box = quantity.kinetic_energy(momentum=S.box_momentum, mass=S.box_mass)
+            bc = bc.set(kinetic_energy=KE_box)
+
+            P, tc = thermostat.half_step(S.momentum, tc, _kT)
+            P_b, bc = barostat.half_step(S.box_momentum, bc, _kT)
+
+            S = S.set(thermostat=tc, barostat=bc, momentum=P, box_momentum=P_b)
+
+            return S
+
     init_fn = jax.jit(init_fn)
     apply_fn = jax.jit(apply_fn)
 
@@ -1236,7 +1461,8 @@ def perform_md(
             md_T,
             box,
             nhc_kwargs,
-            lr
+            lr,
+            initial_velocities = initial_geometry_dict.get('velocities')
         )
     else:
         init_fn, step_md_fn = create_npt_nhc_fn(
@@ -1247,7 +1473,8 @@ def perform_md(
             md_P,
             nhc_kwargs,
             nhc_barostat_kwargs,
-            lr
+            lr,
+            initial_velocities = initial_geometry_dict.get('velocities')
         )
         
     if not restart:
@@ -1387,7 +1614,18 @@ def perform_md(
                         restart_save_path,
                         ensemble='nvt' if md_P is None else 'npt'
                     )
-        
+
+    # Write atoms object to final geometry extxyz file
+    final_geometry = all_settings.get('final_geometry', 'final_geometry.xyz')
+    initial_geometry.set_velocities(jax.numpy.array(state.velocity))
+    if shift_displacement == 'periodic':
+        initial_geometry.positions=jax_md.space.transform(box=box, R=state.position)
+        initial_geometry.set_cell(box)
+    else:
+        initial_geometry.positions=state.position
+        initial_geometry.set_cell(None)
+    write(final_geometry, initial_geometry, format="extxyz")
+
     if logger:
         logger.info('Total_time: {}'.format(time.time()-total_time))
 
