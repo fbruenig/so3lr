@@ -6,7 +6,8 @@ from mlff.md import mlffCalculatorSparse
 
 def make_ase_calculator(
         lr_cutoff=12.,
-        dispersion_energy_lr_cutoff_damping=2.,
+        dispersion_energy_cutoff_lr_damping=2.,
+        calculate_stress=False,
         dtype=np.float32
 ):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
@@ -14,8 +15,9 @@ def make_ase_calculator(
     calc = mlffCalculatorSparse.create_from_ckpt_dir(
         ckpt_dir=package_dir / 'so3lr' / 'params',
         lr_cutoff=lr_cutoff,
-        dispersion_energy_lr_cutoff_damping=dispersion_energy_lr_cutoff_damping,
+        dispersion_energy_lr_cutoff_damping=dispersion_energy_cutoff_lr_damping,
         from_file=True,
+        calculate_stress=calculate_stress,
         dtype=dtype
     )
 
