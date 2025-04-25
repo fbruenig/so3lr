@@ -6,7 +6,7 @@ from mlff.mdx.potential import MLFFPotentialSparse
 
 def make_potential_fn(
     lr_cutoff=12.,
-        dispersion_energy_lr_cutoff_damping=2.,
+        dispersion_energy_cutoff_lr_damping=2.,
         dtype=np.float32,
         workdir= None
 ):
