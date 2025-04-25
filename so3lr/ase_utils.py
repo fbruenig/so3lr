@@ -12,15 +12,21 @@ def make_ase_calculator(
         calculate_charges=False,
         dtype=np.float32,
         obs_fn_kwargs: Dict[str, Dict[str, int]] = {},
-        has_aux=False
+        has_aux=False,
+        workdir= None
 ):
     package_dir = pathlib.Path(__file__).parent.parent.resolve()
 
+    if workdir == None:
+        package_dir = pathlib.Path(__file__).parent.parent.resolve()
+        workdir=package_dir / 'so3lr' / 'params'
+
+
     calc = mlffCalculatorSparse.create_from_ckpt_dir(
-        ckpt_dir=package_dir / 'so3lr' / 'params',
+        ckpt_dir=workdir,
         lr_cutoff=lr_cutoff,
         dispersion_energy_cutoff_lr_damping=dispersion_energy_cutoff_lr_damping,
-        from_file=True,
+        from_file=False,
         calculate_stress=calculate_stress,
         calculate_charges=calculate_charges,
         dtype=dtype,
