@@ -305,6 +305,12 @@ Evaluate SO3LR on a dataset with all options:
 # batch_size: 10                               # Number of molecules per batch
 # targets: "forces,dipole_vec,hirshfeld_ratios" # Targets to evaluate
 # jit_compile: true                            # Use JIT compilation for speed
+
+# # Experimental settings
+#
+# observables: ["partial_charges","dipole_vec","hirshfeld_ratios"]
+#
+# neighbor_list_partitions: 1                   # default is 1, int value > 1 partitions nb_list computation which significantly improves memory usage
 # ```
 
 PARAM_MAP = {

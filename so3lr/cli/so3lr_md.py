@@ -34,6 +34,8 @@ from jax_md.space import DisplacementOrMetricFn, raw_transform
 from mlff.mdx.potential import MLFFPotentialSparse
 from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
 
+from ..scan_neighbor_list import scan_neighbor_list
+
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
 
@@ -630,6 +632,7 @@ def to_jax_md_custom(
         fractional_coordinates: bool = True,
         total_charge: float = 0.,
         precision: jnp.dtype = jnp.float32,
+        neighbor_list_partitions: int = 1,
         **neighbor_kwargs
 ):
     """
@@ -656,7 +659,12 @@ def to_jax_md_custom(
         Tuple of neighbor function, long-range neighbor function, and energy function.
     """
     # Create the neighbor_fn
-    neighbor_fn = partition.neighbor_list(
+    if neighbor_list_partitions > 1:
+        neighbor_list_fn = partial(scan_neighbor_list, num_partitions=neighbor_list_partitions)
+    else:
+        neighbor_list_fn = partition.neighbor_list
+
+    neighbor_fn = neighbor_list_fn(
         displacement_or_metric,
         box,
         potential.cutoff,  # load the cutoff of the model from the MLFFPotential
@@ -671,7 +679,7 @@ def to_jax_md_custom(
         **neighbor_kwargs)
 
     # Create the neighbor_fn for long-range cutoff
-    neighbor_fn_lr = partition.neighbor_list(
+    neighbor_fn_lr = neighbor_list_fn(
         displacement_or_metric,
         box,
         potential.long_range_cutoff,
@@ -717,6 +725,7 @@ def process_model(
     total_charge: float = 0.,
     buffer_size_multiplier_lr: float = 1.25,
     buffer_size_multiplier_sr: float = 1.25,
+    neighbor_list_partitions: int = 1,
     precision: jnp.dtype = jnp.float32,
     fractional_coordinates: bool = False,
     has_aux: bool = False,
@@ -755,6 +764,7 @@ def process_model(
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
+        neighbor_list_partitions=neighbor_list_partitions,
     )
 
     return neighbor_fn, neighbor_fn_lr, energy_or_obs_fn
@@ -1329,6 +1339,7 @@ def perform_md(
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
+    neighbor_list_partitions = all_settings.get('neighbor_list_partitions', 1)
     total_charge = all_settings.get('total_charge')
 
     # MD parameters
@@ -1464,6 +1475,7 @@ def perform_md(
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
         buffer_size_multiplier_sr=buffer_size_multiplier_sr,
+        neighbor_list_partitions=neighbor_list_partitions,
         has_aux=len(observables)>0,
     )
 
@@ -1827,6 +1839,7 @@ def perform_min(
     dispersion_damping = all_settings.get('dispersion_damping')
     buffer_size_multiplier_sr = all_settings.get('buffer_size_multiplier_sr')
     buffer_size_multiplier_lr = all_settings.get('buffer_size_multiplier_lr')
+    neighbor_list_partitions = all_settings.get('neighbor_list_partitions', 1)
     total_charge = all_settings.get('total_charge')
     
     # Settings for the minimization
@@ -1888,7 +1901,8 @@ def perform_min(
         precision=precision,
         fractional_coordinates=fractional_coordinates,
         buffer_size_multiplier_lr=buffer_size_multiplier_lr,
-        buffer_size_multiplier_sr=buffer_size_multiplier_sr
+        buffer_size_multiplier_sr=buffer_size_multiplier_sr,
+        neighbor_list_partitions=neighbor_list_partitions
     )
     energy_fn = jax.jit(partial(energy_or_obs_fn, has_aux=False))
     force_fn = jax.jit(jax_md.quantity.force(energy_fn))
