@@ -6,6 +6,7 @@ from jax_md import partition
 from jax_md.space import DisplacementOrMetricFn, Box
 
 from so3lr.graph import Graph
+from so3lr.scan_neighbor_list import scan_neighbor_list
 
 
 def neighbor_list_featurizer(displacement_fn, species):
@@ -60,10 +61,18 @@ def to_jax_md(
         minimum_cell_size_multiplier_lr: float = 1.0,
         disable_cell_list: bool = False,
         fractional_coordinates: bool = True,
+        neighbor_list_partitions: int = 1,
         **neighbor_kwargs
 ):
+
+    # select the neighbor_list_fn
+    if neighbor_list_partitions > 1:
+        neighbor_list_fn = partial(scan_neighbor_list, num_partitions=neighbor_list_partitions)
+    else:
+        neighbor_list_fn = partition.neighbor_list
+
     # create the neighbor_fn
-    neighbor_fn = partition.neighbor_list(
+    neighbor_fn = neighbor_list_fn(
         displacement_or_metric,
         box_size,
         potential.cutoff,  # load the cutoff of the model from the MLFFPotential
@@ -76,8 +85,9 @@ def to_jax_md(
         disable_cell_list=disable_cell_list,
         **neighbor_kwargs)
 
+
     # create the neighbor_fn for long-range cutoff
-    neighbor_fn_lr = partition.neighbor_list(
+    neighbor_fn_lr = neighbor_list_fn(
         displacement_or_metric,
         box_size,
         potential.long_range_cutoff,

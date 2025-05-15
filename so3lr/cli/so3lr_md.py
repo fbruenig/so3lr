@@ -34,10 +34,11 @@ from jax_md.space import DisplacementOrMetricFn, raw_transform
 from mlff.mdx.potential import MLFFPotentialSparse
 from mlff.mdx.hdfdict import DataSetEntry, HDF5Store
 
-from ..scan_neighbor_list import scan_neighbor_list
 
 from so3lr.graph import Graph
 from so3lr import So3lrPotential
+from so3lr.scan_neighbor_list import scan_neighbor_list
+
 
 # Setup logging
 logger = logging.getLogger("SO3LR")

@@ -37,7 +37,6 @@ import jax
 import jax.lax as lax
 import jax.numpy as jnp
 import numpy as np
-import numpy as onp
 from jax import jit
 
 from jax_md import space
@@ -254,15 +253,19 @@ def scan_neighbor_list(
 
                 cl_capacity = N
 
-                idx = jnp.zeros((1, 1, 1, cl_capacity), dtype=jnp.int32)
-                cell_idx = [idx]  # shape: (1, 1, 1, cl_capacity, 1)
-                cell_idx = jnp.concatenate(cell_idx, axis=-2)
-                cell_idx = jnp.reshape(cell_idx, (-1, cell_idx.shape[-2]))
+                # idx = jnp.zeros((1, 1, 1, cl_capacity), dtype=jnp.int32)
+                # cell_idx = [idx]  # shape: (1, 1, 1, cl_capacity, 1)
+                # cell_idx = jnp.concatenate(cell_idx, axis=-2)
+                # cell_idx = jnp.reshape(cell_idx, (-1, cell_idx.shape[-2]))
+
+                cell_idx = (jnp.arange(N, dtype=jnp.int32)[:, None]).T
 
                 considered_neighbors = N
                 num_cells = 1
 
                 particle_cells = jnp.zeros((N,), dtype=jnp.int32)
+
+                volumetric_factor = 1.0
 
             else:
                 # err = err.update(PEC.CELL_LIST_OVERFLOW, cl.did_buffer_overflow)
@@ -279,7 +282,7 @@ def scan_neighbor_list(
                 cell_idx = [idx]  # shape: (nx, ny, nz, cell_capacity, 1)
 
                 for dindex in _neighboring_cells(dim):
-                    if onp.all(dindex == 0):
+                    if np.all(dindex == 0):
                         continue
                     cell_idx += [shift_array(idx, dindex)]
 
@@ -288,6 +291,13 @@ def scan_neighbor_list(
                 num_cells, considered_neighbors = cell_idx.shape
 
                 particle_cells = get_particle_cells(idx, cl_capacity, N)
+
+                if dim == 2:
+                    # the area of a circle with r=1/3 is 0.34907
+                    volumetric_factor = 0.34907
+                elif dim == 3:
+                    # the volume of a sphere with r=1/3 is 0.15514
+                    volumetric_factor = 0.15514
 
             d = partial(metric_sq, **kwargs)
             d = space.map_bond(d)
@@ -304,13 +314,6 @@ def scan_neighbor_list(
                 ),
                 constant_values=-1,
             )
-
-            if dim == 2:
-                # the area of a circle with r=1/3 is 0.34907
-                volumetric_factor = 0.34907
-            elif dim == 3:
-                # the volume of a sphere with r=1/3 is 0.15514
-                volumetric_factor = 0.15514
 
             num_edges_sub = int(
                 N_sub * considered_neighbors * volumetric_factor * capacity_multiplier
@@ -379,8 +382,8 @@ def scan_neighbor_list(
             ordering = jnp.argsort(idx[1])
             idx = idx[:, ordering]
             if format is NeighborListFormat.OrderedSparse:
-                sender_idx, receiver_idx = idx
-                mask = (sender_idx < receiver_idx)
+                receiver_idx, sender_idx = idx
+                mask = (receiver_idx < sender_idx)
 
                 out_idx = N * jnp.ones(receiver_idx.shape, jnp.int32)
 
@@ -389,8 +392,8 @@ def scan_neighbor_list(
                                   considered_neighbors * N - 1)
                 receiver_idx = out_idx.at[index].set(receiver_idx)
                 sender_idx = out_idx.at[index].set(sender_idx)
-                # occupancy += cumsum[-1]
-                occupancy = occupancy // 2
+                occupancy = cumsum[-1]
+                #occupancy = occupancy // 2
 
                 idx = jnp.stack((receiver_idx, sender_idx))
 
