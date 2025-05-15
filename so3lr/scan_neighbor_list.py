@@ -265,7 +265,7 @@ def scan_neighbor_list(
 
                 particle_cells = jnp.zeros((N,), dtype=jnp.int32)
 
-                volumetric_factor = 1.0
+                #volumetric_factor = 1.0
 
             else:
                 # err = err.update(PEC.CELL_LIST_OVERFLOW, cl.did_buffer_overflow)
@@ -292,12 +292,15 @@ def scan_neighbor_list(
 
                 particle_cells = get_particle_cells(idx, cl_capacity, N)
 
-                if dim == 2:
-                    # the area of a circle with r=1/3 is 0.34907
-                    volumetric_factor = 0.34907
-                elif dim == 3:
-                    # the volume of a sphere with r=1/3 is 0.15514
-                    volumetric_factor = 0.15514
+                # if dim == 2:
+                #     # the area of a circle with r=1/3 is 0.34907
+                #     volumetric_factor = 0.34907
+                # elif dim == 3:
+                #     # the volume of a sphere with r=1/3 is 0.15514
+                #     volumetric_factor = 0.15514
+            volumetric_factor = 0.5235987755982988
+            if format is NeighborListFormat.OrderedSparse:
+                volumetric_factor /= 2
 
             d = partial(metric_sq, **kwargs)
             d = space.map_bond(d)
@@ -355,6 +358,8 @@ def scan_neighbor_list(
 
                 mask = (dR < cutoff_sq) & (receiver_idx < N)
                 out_idx = N * jnp.ones(receiver_idx.shape, jnp.int32)
+                if format is NeighborListFormat.OrderedSparse:
+                    mask = mask & (receiver_idx < sender_idx)
 
                 cumsum = jnp.cumsum(mask)
                 index = jnp.where(mask, cumsum - 1,
@@ -378,10 +383,7 @@ def scan_neighbor_list(
             err = err.update(PEC.CELL_LIST_OVERFLOW, overflows.sum())
             idx = idx.transpose(1, 2, 0).reshape(2, -1)
 
-            # sort to enable pruning later
-            ordering = jnp.argsort(idx[1])
-            idx = idx[:, ordering]
-            if format is NeighborListFormat.OrderedSparse:
+            def prune(idx):
                 receiver_idx, sender_idx = idx
                 mask = (receiver_idx < sender_idx)
 
@@ -394,8 +396,13 @@ def scan_neighbor_list(
                 sender_idx = out_idx.at[index].set(sender_idx)
                 occupancy = cumsum[-1]
                 #occupancy = occupancy // 2
+                return jnp.stack((receiver_idx, sender_idx)), occupancy
 
-                idx = jnp.stack((receiver_idx, sender_idx))
+            # sort to enable pruning later
+            ordering = jnp.argsort(idx[1])
+            idx = idx[:, ordering]
+            #if format is NeighborListFormat.OrderedSparse:
+            #    idx, occupancy = prune(idx)
 
             if max_occupancy is None:
                 _extra_capacity = N * extra_capacity

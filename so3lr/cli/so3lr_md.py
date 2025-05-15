@@ -662,8 +662,10 @@ def to_jax_md_custom(
     # Create the neighbor_fn
     if neighbor_list_partitions > 1:
         neighbor_list_fn = partial(scan_neighbor_list, num_partitions=neighbor_list_partitions)
+        logger.info(f'Using custom memory-efficient neighbor list with {neighbor_list_partitions} partitions.')
     else:
         neighbor_list_fn = partition.neighbor_list
+        logger.info(f'Using native jax-md neighbor list.')
 
     neighbor_fn = neighbor_list_fn(
         displacement_or_metric,
